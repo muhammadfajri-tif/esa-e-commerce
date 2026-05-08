@@ -174,3 +174,121 @@ All endpoints implement standard NestJS Global Exception Filters (`HttpException
   "message": "Failed to get saga status: Request failed with status code 500"
 }
 ```
+
+---
+
+## 3. Internal System APIs
+
+> [!NOTE]
+> **Internal Services Only**
+> The following endpoints are strictly for service-to-service (RPC) communication within the private Docker network. They are not exposed to the public internet by the API Gateway.
+
+### 3.1. Orchestrator Service
+
+The Orchestrator Service manages the lifecycle of the distributed transaction.
+
+#### 3.1.1. Start Saga
+- **URL**: `http://orchestrator-service:3001/saga/start`
+- **Method**: `POST`
+- **Content-Type**: `application/json`
+
+**Request Schema:**
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `saga_id` | `string` (UUID) | Yes | The generated UUID for the saga. |
+| `order_request` | `Object` | Yes | The original checkout request payload. |
+
+**Response**: Returns the `saga_id` and `{ "status": "started" }`.
+
+#### 3.1.2. Get Saga Status
+- **URL**: `http://orchestrator-service:3001/saga/:saga_id/status`
+- **Method**: `GET`
+- **Content-Type**: `application/json`
+
+**Response**: Returns the full `SagaStateEntity` (see section 1.2 for the schema).
+
+---
+
+### 3.2. Worker Services (Command pattern)
+
+The **Order**, **Inventory**, **Payment**, and **Shipping** services all implement a standard asynchronous Command endpoint to process steps of the saga.
+
+- **Base URLs**:
+  - `http://order-service:3002/api/v1/command`
+  - `http://inventory-service:3003/api/v1/command`
+  - `http://payment-service:3004/api/v1/command`
+  - `http://shipping-service:3005/api/v1/command`
+- **Method**: `POST`
+- **Content-Type**: `application/json`
+
+#### Request Schema (SagaCommand)
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `saga_id` | `string` (UUID) | Yes | The saga transaction identifier. |
+| `request_id` | `string` (UUID) | Yes | Unique ID for idempotency of this specific command. |
+| `command_type` | `CommandType` | Yes | The action to perform. |
+| `timestamp` | `string` (ISO) | Yes | When the command was issued. |
+| `payload` | `Object` | Yes | Data required to execute the command. |
+| `retry_count` | `number` | No | How many times this command has been retried. |
+
+**CommandType Enum Values:**
+- `CREATE_ORDER`
+- `RESERVE_STOCK`
+- `CHARGE_PAYMENT`
+- `CREATE_SHIPMENT`
+- `RELEASE_STOCK` (Compensating action)
+- `REFUND_PAYMENT` (Compensating action)
+- `CANCEL_ORDER` (Compensating action)
+
+#### Request Example (SagaCommand)
+
+```json
+{
+  "saga_id": "a91a9b23-cd8e-4a6c-9457-3dc61234c890",
+  "request_id": "req-12345",
+  "command_type": "RESERVE_STOCK",
+  "timestamp": "2023-10-01T12:00:01.000Z",
+  "payload": {
+    "items": [
+      {
+        "product_id": "123e4567-e89b-12d3-a456-426614174000",
+        "quantity": 2
+      }
+    ]
+  },
+  "retry_count": 0
+}
+```
+
+#### Response Schema (SagaResponse)
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `saga_id` | `string` (UUID) | The saga transaction identifier. |
+| `request_id` | `string` (UUID) | Matches the `request_id` from the `SagaCommand`. |
+| `success` | `boolean` | `true` if the command completed successfully, `false` otherwise. |
+| `message` | `string` | Status message or error description. |
+| `data` | `Object` | Optional return data (e.g., generated database IDs). |
+
+#### Response Example (Success)
+
+```json
+{
+  "saga_id": "a91a9b23-cd8e-4a6c-9457-3dc61234c890",
+  "request_id": "req-12345",
+  "success": true,
+  "message": "Stock reserved successfully"
+}
+```
+
+#### Response Example (Failure - Triggers Compensation)
+
+```json
+{
+  "saga_id": "a91a9b23-cd8e-4a6c-9457-3dc61234c890",
+  "request_id": "req-12345",
+  "success": false,
+  "message": "Insufficient stock for product 123e4567"
+}
+```
